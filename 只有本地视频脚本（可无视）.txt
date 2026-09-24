@@ -1,0 +1,817 @@
+1.html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>YOLOv13 智能桌球裁判</title>
+
+  <link rel="stylesheet" href="https://cdn.staticfile.org/element-plus/2.3.8/index.css">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+  <div id="app">
+
+    <!-- 隐藏预加载视频流：页面一打开就请求 /video_feed -->
+    <img src="/video_feed" style="display:none;" alt="preload-stream">
+
+    <!-- 登录页 -->
+    <div v-if="!isLoggedIn" class="login-wrapper" :class="{ 'is-leaving': loading }">
+      <div class="login-box">
+        <div class="login-title">🎱 智能裁判系统</div>
+        <p class="login-subtitle">
+          打开即预热视频流与检测模型，进入后即可实时计分、犯规提示与回放控制。
+        </p>
+
+        <el-form @submit.prevent>
+          <el-form-item class="login-form-item">
+            <el-input
+              v-model="username"
+              placeholder="用户名"
+              clearable
+              @keyup.enter="handleLogin"
+            />
+          </el-form-item>
+
+          <el-form-item class="login-form-item">
+            <el-input
+              v-model="password"
+              type="password"
+              placeholder="密码"
+              show-password
+              @keyup.enter="handleLogin"
+            />
+          </el-form-item>
+
+          <el-button
+            type="primary"
+            size="large"
+            class="login-btn"
+            @click="handleLogin"
+            :loading="loading"
+          >
+            进入系统
+          </el-button>
+        </el-form>
+
+        <div class="login-hint">
+          测试账号（写死）：用户名 <b>admin</b> ，密码 <b>123456</b>
+        </div>
+
+        <div class="pill-row">
+          <span class="pill">YOLOv13 + ByteTrack</span>
+          <span class="pill">Local Stream</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 主界面 -->
+    <div v-else class="dashboard">
+      <div class="video-container">
+        <div class="control-bar">
+          <el-button-group>
+            <el-button type="primary" size="large" @click="togglePause">
+              [[ isPaused ? '▶ 继续播放' : '⏸ 暂停视频' ]]
+            </el-button>
+            <el-button type="danger" size="large" @click="restartVideo">
+              🔄 重新开始
+            </el-button>
+          </el-button-group>
+          <div class="video-tag">RTX 3060 Accel</div>
+        </div>
+
+        <div class="video-panel">
+          <img src="/video_feed" class="live-feed" alt="live-feed">
+        </div>
+      </div>
+
+      <div class="data-panel">
+        <div v-if="foul" class="foul-alert">⚠️ 犯规警报：母球入袋！</div>
+
+        <div class="score-card solid-border">
+          <div class="team-title">🟦 实色球 (SOLIDS)</div>
+          <div class="score-num solid-color">[[ scoreSolid ]]</div>
+          <div class="btn-row">
+            <el-button circle size="small" @click="adjust('solid', -1)">-</el-button>
+            <el-button circle size="small" @click="adjust('solid', 1)">+</el-button>
+          </div>
+        </div>
+
+        <div class="score-card stripe-border">
+          <div class="team-title">🟧 花色球 (STRIPES)</div>
+          <div class="score-num stripe-color">[[ scoreStripe ]]</div>
+          <div class="btn-row">
+            <el-button circle size="small" @click="adjust('stripe', -1)">-</el-button>
+            <el-button circle size="small" @click="adjust('stripe', 1)">+</el-button>
+          </div>
+        </div>
+
+        <div class="status-bar">
+          <el-button type="warning" size="small" @click="clearFoul" plain>清除犯规</el-button>
+          <el-button type="info" size="small" @click="resetGame">清空比分</el-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.staticfile.org/vue/3.3.4/vue.global.prod.min.js"></script>
+  <script src="https://cdn.staticfile.org/element-plus/2.3.8/index.full.min.js"></script>
+  <script src="https://cdn.staticfile.org/axios/1.5.0/axios.min.js"></script>
+  <script src="/static/js/logic.js"></script>
+</body>
+</html>
+
+
+
+
+
+
+2.js
+const { createApp, ref } = Vue;
+
+const app = createApp({
+    setup() {
+        const isLoggedIn = ref(false);
+        const loading = ref(false);
+
+        // 新增：登录表单
+        const username = ref('');
+        const password = ref('');
+
+        const scoreSolid = ref(0);
+        const scoreStripe = ref(0);
+        const foul = ref(false);
+        const isPaused = ref(false);
+
+        let pollingTimer = null;
+        let gameOverShown = false;
+
+        const handleLogin = () => {
+            if (loading.value || isLoggedIn.value) return;
+
+            if (!username.value.trim() || !password.value.trim()) {
+                ElementPlus.ElMessage.warning('请输入用户名和密码');
+                return;
+            }
+
+            loading.value = true;
+
+            axios.post('/api/login', {
+                username: username.value.trim(),
+                password: password.value.trim()
+            })
+            .then(res => {
+                if (res.data.ok) {
+                    // 给淡出动画一点时间
+                    setTimeout(() => {
+                        isLoggedIn.value = true;
+                        loading.value = false;
+                        startPolling();
+                    }, 220);
+                } else {
+                    loading.value = false;
+                    ElementPlus.ElMessage.error(res.data.msg || '登录失败');
+                }
+            })
+            .catch(err => {
+                loading.value = false;
+                const msg = err?.response?.data?.msg || '登录失败';
+                ElementPlus.ElMessage.error(msg);
+                console.error('登录失败:', err);
+            });
+        };
+
+        const startPolling = () => {
+            if (pollingTimer) return;
+
+            fetchStatus(); // 先拉一次
+            pollingTimer = setInterval(fetchStatus, 500);
+        };
+
+        const fetchStatus = () => {
+            axios.get('/api/status')
+                .then(res => {
+                    scoreSolid.value = res.data.solid;
+                    scoreStripe.value = res.data.stripe;
+                    foul.value = res.data.foul;
+
+                    if (res.data.game_over) {
+                        if (!gameOverShown) {
+                            ElementPlus.ElMessage.warning('黑八入袋，比赛重置！');
+                            gameOverShown = true;
+                        }
+                    } else {
+                        gameOverShown = false;
+                    }
+                })
+                .catch(err => {
+                    console.error('获取状态失败:', err);
+                });
+        };
+
+        const togglePause = () => {
+            if (isPaused.value) {
+                axios.post('/api/control/resume')
+                    .then(() => { isPaused.value = false; })
+                    .catch(err => {
+                        ElementPlus.ElMessage.error('恢复播放失败');
+                        console.error(err);
+                    });
+            } else {
+                axios.post('/api/control/pause')
+                    .then(() => { isPaused.value = true; })
+                    .catch(err => {
+                        ElementPlus.ElMessage.error('暂停视频失败');
+                        console.error(err);
+                    });
+            }
+        };
+
+        const restartVideo = () => {
+            if (confirm('确定要重新开始比赛并重播视频吗？')) {
+                axios.post('/api/control/restart')
+                    .then(() => {
+                        isPaused.value = false;
+                        foul.value = false;
+                        gameOverShown = false;
+                    })
+                    .catch(err => {
+                        ElementPlus.ElMessage.error('重播失败');
+                        console.error(err);
+                    });
+            }
+        };
+
+        const adjust = (team, delta) => {
+            axios.post('/api/adjust', { team, delta })
+                .then(() => {
+                    // 保持原来即时反馈体验
+                    if (team === 'solid') scoreSolid.value += delta;
+                    else scoreStripe.value += delta;
+                })
+                .catch(err => {
+                    ElementPlus.ElMessage.error('调整比分失败');
+                    console.error(err);
+                });
+        };
+
+        const clearFoul = () => {
+            axios.get('/api/clear_foul')
+                .then(() => { foul.value = false; })
+                .catch(err => {
+                    ElementPlus.ElMessage.error('清除犯规失败');
+                    console.error(err);
+                });
+        };
+
+        const resetGame = () => {
+            if (confirm('仅清空比分？')) {
+                axios.get('/api/reset')
+                    .then(() => {
+                        scoreSolid.value = 0;
+                        scoreStripe.value = 0;
+                        foul.value = false;
+                        gameOverShown = false;
+                    })
+                    .catch(err => {
+                        ElementPlus.ElMessage.error('重置比赛失败');
+                        console.error(err);
+                    });
+            }
+        };
+
+        return {
+            isLoggedIn, loading,
+            username, password,
+            handleLogin,
+            scoreSolid, scoreStripe, foul, isPaused,
+            togglePause, restartVideo, adjust, clearFoul, resetGame
+        };
+    }
+});
+
+app.config.compilerOptions.delimiters = ['[[', ']]'];
+app.use(ElementPlus);
+app.mount('#app');
+
+
+
+
+3.css
+
+
+body {
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: 'Segoe UI', sans-serif;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* 登录 */
+.login-wrapper {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(255,255,255,0.08), transparent 40%),
+    radial-gradient(circle at 80% 90%, rgba(255,255,255,0.06), transparent 45%),
+    linear-gradient(135deg, #0b1220, #0f1c35);
+  z-index: 999;
+  animation: fadeIn 300ms ease both;
+}
+
+.login-box {
+  width: 420px;
+  max-width: calc(100vw - 40px);
+  padding: 28px 26px 22px;
+  background: rgba(30, 41, 59, 0.90);
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.12);
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.35);
+  backdrop-filter: blur(10px);
+  animation: popIn 320ms ease both;
+}
+
+.login-title {
+  color: #fff;
+  font-size: 28px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.login-subtitle {
+  color: rgba(255,255,255,0.78);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0 0 16px 0;
+}
+
+.login-form-item {
+  margin-bottom: 12px !important;
+}
+
+.login-btn {
+  width: 100%;
+  height: 44px;
+  font-weight: 700;
+}
+
+.login-hint {
+  margin-top: 10px;
+  color: rgba(255,255,255,0.68);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.pill-row {
+  margin-top: 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: rgba(255,255,255,0.75);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.login-wrapper.is-leaving {
+  animation: fadeOut 260ms ease both;
+  pointer-events: none;
+}
+
+/* 登录输入框美化（Element Plus） */
+.login-box .el-input__wrapper {
+  background: rgba(255,255,255,0.08) !important;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset !important;
+}
+.login-box .el-input__inner {
+  color: #fff !important;
+}
+.login-box .el-input__inner::placeholder {
+  color: rgba(255,255,255,0.55) !important;
+}
+.login-box .el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px #409eff inset !important;
+}
+
+/* 布局 */
+.dashboard {
+  display: flex;
+  height: 100vh;
+  padding: 20px;
+  gap: 20px;
+  animation: dashIn 260ms ease both;
+}
+.video-container {
+  flex: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.data-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+/* 控制栏 */
+.control-bar {
+  background: #1e293b;
+  padding: 10px 20px;
+  border-radius: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid #334155;
+}
+
+.video-tag {
+  color: #10b981;
+  font-weight: bold;
+  font-size: 14px;
+}
+
+/* 视频框 */
+.video-panel {
+  flex: 1;
+  background: #000;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 2px solid #334155;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.live-feed {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 计分卡 */
+.score-card {
+  background: #1e293b;
+  border-radius: 16px;
+  padding: 20px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #334155;
+}
+.solid-border { border-top: 5px solid #3b82f6; }
+.stripe-border { border-top: 5px solid #f59e0b; }
+
+.team-title {
+  font-size: 18px;
+  color: #94a3b8;
+  margin-bottom: 10px;
+}
+
+.score-num {
+  font-family: Consolas, monospace;
+  font-size: 80px;
+  font-weight: bold;
+  line-height: 1;
+}
+
+.solid-color {
+  color: #3b82f6;
+  text-shadow: 0 0 20px rgba(59,130,246,0.3);
+}
+.stripe-color {
+  color: #f59e0b;
+  text-shadow: 0 0 20px rgba(245,158,11,0.3);
+}
+
+.btn-row {
+  margin-top: 15px;
+  display: flex;
+  gap: 10px;
+}
+
+.foul-alert {
+  background: #ef4444;
+  color: white;
+  padding: 15px;
+  border-radius: 12px;
+  text-align: center;
+  font-weight: bold;
+  animation: pulse 1s infinite;
+}
+
+.status-bar {
+  background: #1e293b;
+  padding: 15px;
+  border-radius: 12px;
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+/* 动画 */
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.8; }
+  100% { opacity: 1; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes dashIn {
+  from { opacity: 0; filter: blur(2px); transform: translateY(6px); }
+  to   { opacity: 1; filter: blur(0); transform: translateY(0); }
+}
+
+
+4.app
+import os
+import sys
+import cv2
+import time
+import threading
+from flask import Flask, Response, jsonify, request, render_template, session
+from flask_cors import CORS
+
+base_path = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(base_path, ".."))
+yolo_src = os.path.join(project_root, "YOLOv13-main")
+sys.path.insert(0, yolo_src)
+
+from ultralytics import YOLO
+from scoring import BilliardScoring
+
+app = Flask(__name__, static_folder="static", template_folder="templates")
+app.secret_key = "billiard_system_secret_key_2026"  # session 用
+CORS(app)
+
+# --- 全局配置 ---
+VIDEO_SOURCE = os.path.join(base_path, "videos", "test1.mp4")
+MODEL_PATH = os.path.join(base_path, "models", "best.pt")
+
+# 写死登录账号
+LOGIN_USER = "admin"
+LOGIN_PASS = "123456"
+
+video_state = {
+    "is_paused": False,
+    "need_restart": False
+}
+
+state_lock = threading.Lock()
+frame_lock = threading.Lock()
+
+latest_jpeg = None
+worker_started = False
+
+print(f"🚀 Loading Model: {MODEL_PATH}")
+model = YOLO(MODEL_PATH)
+print("模型类别:", model.names)  # 方便你确认黑八类别ID
+scorer = BilliardScoring()
+
+
+def video_worker():
+    """后台唯一视频线程：只开一次视频和YOLO追踪"""
+    global latest_jpeg
+
+    cap = cv2.VideoCapture(VIDEO_SOURCE)
+    if not cap.isOpened():
+        print(f"❌ 无法打开视频: {VIDEO_SOURCE}")
+        return
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        fps = 30.0
+    frame_delay = 1.0 / fps
+
+    print(f"✅ 视频线程启动，FPS={fps:.2f}")
+
+    while True:
+        start_time = time.time()
+
+        with state_lock:
+            need_restart = video_state["need_restart"]
+            is_paused = video_state["is_paused"]
+
+            if need_restart:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                scorer.reset_game()
+                video_state["need_restart"] = False
+                video_state["is_paused"] = False
+                is_paused = False
+
+        if is_paused:
+            time.sleep(0.05)
+            continue
+
+        success, frame = cap.read()
+        if not success:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            time.sleep(0.01)
+            continue
+
+        try:
+            results = model.track(
+                frame,
+                persist=True,
+                conf=0.15,
+                iou=0.4,
+                tracker="bytetrack.yaml",
+                verbose=False
+            )
+
+            scorer.update(results[0])
+            annotated_frame = results[0].plot()
+
+            # 画袋口监控圈
+            for px, py in scorer.pockets:
+                cv2.circle(
+                    annotated_frame,
+                    (int(px), int(py)),
+                    scorer.pocket_radius,
+                    (0, 255, 0),
+                    2
+                )
+
+        except Exception as e:
+            print(f"⚠️ YOLO处理异常: {e}")
+            annotated_frame = frame
+
+        ret, buffer = cv2.imencode('.jpg', annotated_frame)
+        if ret:
+            with frame_lock:
+                latest_jpeg = buffer.tobytes()
+
+        # 控制播放速度
+        processing_time = time.time() - start_time
+        sleep_time = frame_delay - processing_time
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
+
+def ensure_worker_started():
+    """确保后台线程只启动一次"""
+    global worker_started
+    with state_lock:
+        if not worker_started:
+            t = threading.Thread(target=video_worker, daemon=True)
+            t.start()
+            worker_started = True
+
+
+def generate_stream():
+    """前端只读取最新帧，不重复开YOLO/视频"""
+    ensure_worker_started()
+
+    while True:
+        with frame_lock:
+            frame_data = latest_jpeg
+
+        if frame_data is None:
+            time.sleep(0.03)
+            continue
+
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_data + b'\r\n')
+
+        time.sleep(0.01)
+
+
+def is_logged_in():
+    return bool(session.get("logged_in", False))
+
+
+# --- 路由 API ---
+
+@app.route('/')
+def index():
+    # ✅ 不再在首页启动视频线程（满足你的新需求）
+    return render_template('index.html')
+
+
+@app.route('/video_feed')
+def video_feed():
+    # ✅ 只有登录后才能拉视频流
+    if not is_logged_in():
+        return Response("Unauthorized", status=401)
+
+    return Response(generate_stream(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json(force=True)
+    username = str(data.get('username', '')).strip()
+    password = str(data.get('password', '')).strip()
+
+    if username == LOGIN_USER and password == LOGIN_PASS:
+        session["logged_in"] = True
+        return jsonify({"ok": True, "msg": "登录成功"})
+    return jsonify({"ok": False, "msg": "用户名或密码错误"}), 401
+
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({"ok": True, "msg": "已退出登录"})
+
+
+@app.route('/api/status')
+def get_status():
+    if not is_logged_in():
+        return jsonify({"msg": "Unauthorized"}), 401
+    return jsonify(scorer.get_status())
+
+
+@app.route('/api/control/pause', methods=['POST'])
+def pause_video():
+    if not is_logged_in():
+        return jsonify({"msg": "Unauthorized"}), 401
+
+    with state_lock:
+        video_state["is_paused"] = True
+    return jsonify({"msg": "Paused"})
+
+
+@app.route('/api/control/resume', methods=['POST'])
+def resume_video():
+    if not is_logged_in():
+        return jsonify({"msg": "Unauthorized"}), 401
+
+    with state_lock:
+        video_state["is_paused"] = False
+    return jsonify({"msg": "Resumed"})
+
+
+@app.route('/api/control/restart', methods=['POST'])
+def restart_video():
+    if not is_logged_in():
+        return jsonify({"msg": "Unauthorized"}), 401
+
+    with state_lock:
+        video_state["need_restart"] = True
+    return jsonify({"msg": "Restarted"})
+
+
+@app.route('/api/adjust', methods=['POST'])
+def adjust_score():
+    if not is_logged_in():
+        return jsonify({"msg": "Unauthorized"}), 401
+
+    data = request.get_json(force=True)
+    team = data.get('team')
+    delta = int(data.get('delta', 0))
+
+    if team == 'solid':
+        scorer.score_solid += delta
+    elif team == 'stripe':
+        scorer.score_stripe += delta
+
+    return jsonify(scorer.get_status())
+
+
+@app.route('/api/clear_foul')
+def clear_foul():
+    if not is_logged_in():
+        return jsonify({"msg": "Unauthorized"}), 401
+
+    scorer.reset_foul()
+    return jsonify({"msg": "Foul Cleared"})
+
+
+@app.route('/api/reset')
+def reset_game_manual():
+    if not is_logged_in():
+        return jsonify({"msg": "Unauthorized"}), 401
+
+    scorer.reset_game()
+    return jsonify({"msg": "Game Reset"})
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+
+

@@ -1,0 +1,10 @@
+# --- Web 后端框架 ---
+Flask>=2.2.0
+Flask-Cors>=3.0.10
+
+# --- 计算机视觉与矩阵计算 ---
+opencv-python>=4.6.0.66
+numpy<2.0.0
+
+# --- 核心 AI 引擎 ---
+ultralytics>=8.0.0
