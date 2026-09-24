@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>YOLOv13 智能桌球裁判</title>
+  <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/element-plus/2.3.8/index.min.css">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div id="app" v-cloak>
+    <input ref="videoFileInput" type="file" accept="video/mp4,video/avi,video/mov,video/mkv,video/webm" style="display:none" @change="handleVideoFileChange">
+
+    <div v-if="pageStage === 'login'" class="login-wrapper" :class="{ 'is-leaving': loading }">
+      <div class="login-box glass-panel">
+        <div class="logo-container animate-item stagger-1">
+          <div class="logo-circle">🎱</div>
+        </div>
+
+        <div class="login-title animate-item stagger-2">智能裁判系统</div>
+        <p class="login-subtitle animate-item stagger-3">YOLOv13 视觉引擎 · 实时高精度计分</p>
+
+        <el-form @submit.prevent class="animate-item stagger-4 login-form">
+          <el-form-item class="login-form-item">
+            <el-input v-model="username" placeholder="管理员账号" clearable @keyup.enter="handleLogin" size="large" />
+          </el-form-item>
+
+          <el-form-item class="login-form-item">
+            <el-input v-model="password" type="password" placeholder="系统密码" show-password @keyup.enter="handleLogin" size="large" />
+          </el-form-item>
+
+          <div class="login-btn-wrap">
+            <el-button type="primary" class="apple-btn login-btn" @click="handleLogin" :loading="loading">
+              进入系统
+            </el-button>
+          </div>
+        </el-form>
+
+        <div class="login-hint animate-item stagger-5">测试账号：admin / 123456</div>
+
+        <div class="pill-row animate-item stagger-5">
+          <span class="pill">Vue 3 + Element Plus</span>
+          <span class="pill">Flask + YOLO</span>
+          <span class="pill">Ollama Assistant</span>
+        </div>
+      </div>
+    </div>
+
+    <div v-else-if="pageStage === 'mode_select'" class="mode-wrapper">
+      <div class="mode-layout">
+        <div class="mode-box glass-panel">
+          <div class="mode-header animate-item stagger-1">
+            <h2>选择识别模式</h2>
+            <p>请选择本次演示的数据流来源</p>
+          </div>
+
+          <div class="mode-cards animate-item stagger-2">
+            <div class="mode-card" :class="{ active: selectedMode === 'file' }" @click="selectedMode = 'file'">
+              <div class="mode-icon">🎬</div>
+              <div class="mode-name">本地视频回放</div>
+              <div class="mode-desc">使用预置或自定义比赛视频进行检测，稳定适合功能演示</div>
+              <div class="mode-tag blue-tag">推荐</div>
+            </div>
+
+            <div class="mode-card" :class="{ active: selectedMode === 'camera' }" @click="chooseCameraMode">
+              <div class="mode-icon">📷</div>
+              <div class="mode-name">实时摄像头</div>
+              <div class="mode-desc">调用外接或内置摄像头进行实时推理，支持比赛录制</div>
+              <div class="mode-tag orange-tag">实时</div>
+            </div>
+          </div>
+
+          <div class="local-video-panel animate-item stagger-3" v-if="selectedMode === 'file'">
+            <div class="camera-panel-title">本地视频文件</div>
+            <div class="local-video-row">
+              <span class="camera-tip">当前视频：[[ currentVideoName ]]</span>
+              <el-button class="apple-btn-plain" :loading="uploadingVideo" @click="triggerVideoSelect">更换本地视频</el-button>
+            </div>
+          </div>
+
+          <div class="camera-panel animate-item stagger-3" v-if="selectedMode === 'camera'">
+            <div class="camera-panel-title">物理设备选项</div>
+            <div class="camera-row">
+              <span class="camera-tip">系统已自动搜寻可用端口，请选择您的摄像头设备</span>
+            </div>
+            <div class="camera-row" v-if="cameraOptions.length > 0">
+              <el-select v-model="selectedCamera" class="camera-select-full" size="large">
+                <el-option v-for="cam in cameraOptions" :key="cam.value" :label="cam.label" :value="cam.value" />
+              </el-select>
+            </div>
+          </div>
+
+          <div class="mode-actions animate-item stagger-4">
+            <el-button class="apple-btn-plain" size="large" @click="backToLogin">返回登录</el-button>
+            <el-button type="primary" class="apple-btn" size="large" :loading="enteringDashboard" @click="confirmModeAndEnter">确认进入</el-button>
+          </div>
+        </div>
+
+        <div class="coach-panel glass-panel animate-item stagger-2">
+          <div class="coach-title-row">
+            <div>
+              <div class="coach-title">🎱 桌球教练智能体</div>
+              <div class="coach-subtitle">调用本地 Ollama，为你提供击球建议、规则解释与战术分析</div>
+            </div>
+            <div class="coach-status" :class="coachLoading ? 'busy' : 'ready'">[[ coachLoading ? '思考中' : '已连接' ]]</div>
+          </div>
+
+          <div class="coach-chat-box" ref="coachScrollRef">
+            <div v-for="(item, idx) in coachMessages" :key="idx" class="coach-msg" :class="item.role">
+              <div class="coach-msg-role">[[ item.role === 'user' ? '我' : '专属桌球教练' ]]</div>
+              <div class="coach-msg-content">[[ item.content ]]</div>
+            </div>
+          </div>
+
+          <div class="coach-quick-row">
+            <el-button size="small" class="apple-btn-plain" @click="askQuickQuestion('我现在应该优先进攻还是防守？')">进攻还是防守</el-button>
+            <el-button size="small" class="apple-btn-plain" @click="askQuickQuestion('开球后如何规划母球走位？')">母球走位</el-button>
+            <el-button size="small" class="apple-btn-plain" @click="askQuickQuestion('解释一下黑八规则和常见犯规')">黑八规则</el-button>
+          </div>
+
+          <div class="coach-input-row">
+            <el-input
+              v-model="coachInput"
+              type="textarea"
+              :rows="4"
+              resize="none"
+              placeholder="例如：我方当前领先一分，下一杆更适合进攻还是防守？"
+              @keyup.enter.ctrl.exact.prevent="sendCoachMessage"
+            />
+          </div>
+
+          <div class="coach-hint">按 Ctrl + Enter 发送</div>
+
+          <div class="coach-actions">
+            <el-button class="apple-btn-plain" @click="clearCoachMessages">清空对话</el-button>
+            <el-button type="primary" class="apple-btn" :loading="coachLoading" @click="sendCoachMessage">发送</el-button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-else class="dashboard">
+      <div class="video-container animate-item stagger-1">
+        <div class="control-bar glass-panel">
+          <el-button-group>
+            <el-button type="primary" class="apple-btn" @click="togglePause">
+              [[ isPaused ? '▶ 开始 / 继续' : '⏸ 暂停画面' ]]
+            </el-button>
+            <el-button class="apple-btn-plain" @click="restartVideo">🔄 重新开始</el-button>
+            <el-button v-if="selectedMode === 'file'" class="apple-btn-plain" :loading="uploadingVideo" @click="triggerVideoSelect">🎞 更换视频</el-button>
+            <el-button v-if="selectedMode === 'camera'" :class="isRecording ? 'apple-btn-danger' : 'apple-btn-plain'" @click="toggleRecording">
+              [[ isRecording ? '⏹ 停止录制' : '⏺ 开始录制' ]]
+            </el-button>
+            <el-button class="apple-btn-plain" @click="backToModeSelect">↩ 返回选择</el-button>
+          </el-button-group>
+          <div class="video-tag">[[ selectedMode === 'file' ? currentVideoName : (isRecording ? ('录制中 · ' + (recordingFilename || 'camera.mp4')) : '实时摄像头模式') ]]</div>
+        </div>
+
+        <div class="video-panel glass-panel">
+          <img :src="videoFeedUrl" class="live-feed" alt="live-feed">
+        </div>
+
+        <div class="progress-bar-container glass-panel" v-if="selectedMode === 'file'">
+          <el-slider v-model="videoProgress" @change="onProgressChange" @mousedown="isDragging = true" @mouseup="isDragging = false" :format-tooltip="formatTooltip" :show-tooltip="true"></el-slider>
+        </div>
+      </div>
+
+      <div class="data-panel animate-item stagger-2">
+        <div v-if="foul" class="foul-alert glass-panel">⚠️ 犯规警报：母球入袋！</div>
+        <div v-if="gameOver" class="foul-alert success-alert glass-panel">🏆 比赛结束：[[ winner ]]</div>
+
+        <div class="score-card solid-card glass-panel">
+          <div class="team-title">实色球 (SOLIDS)</div>
+          <div class="score-num solid-color">[[ scoreSolid ]]</div>
+          <div class="btn-row">
+            <el-button circle class="apple-btn-plain" @click="adjust('solid', -1)">-</el-button>
+            <el-button circle type="primary" class="apple-btn" @click="adjust('solid', 1)">+</el-button>
+          </div>
+        </div>
+
+        <div class="score-card stripe-card glass-panel">
+          <div class="team-title">花色球 (STRIPES)</div>
+          <div class="score-num stripe-color">[[ scoreStripe ]]</div>
+          <div class="btn-row">
+            <el-button circle class="apple-btn-plain" @click="adjust('stripe', -1)">-</el-button>
+            <el-button circle type="warning" class="apple-btn" @click="adjust('stripe', 1)">+</el-button>
+          </div>
+        </div>
+
+        <div class="status-bar glass-panel">
+          <el-button class="apple-btn-plain" @click="clearFoul">清除犯规</el-button>
+          <el-button class="apple-btn-danger" @click="resetGame">清空比分</el-button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.bootcdn.net/ajax/libs/vue/3.3.4/vue.global.prod.min.js"></script>
+  <script src="https://cdn.bootcdn.net/ajax/libs/element-plus/2.3.8/index.full.min.js"></script>
+  <script src="https://cdn.bootcdn.net/ajax/libs/axios/1.5.0/axios.min.js"></script>
+  <script src="/static/js/logic.js"></script>
+</body>
+</html>
